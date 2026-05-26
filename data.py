@@ -1,23 +1,29 @@
 import torch
+import random
 from torchvision import datasets, transforms
+import torchvision.transforms.functional as TF
 from torch.utils.data import Dataset, random_split
 import numpy as np
 
 # Define data transform (You can freely modify this part to suit your needs)
 # CHANGED: split into two transforms — images need normalization, masks must NOT
 # be normalized because their values (0,1,2) are class labels, not pixel colors
-image_transform = transforms.Compose([
-    transforms.Resize((256, 256)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                         std=[0.229, 0.224, 0.225])
-])
+normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                  std=[0.229, 0.224, 0.225])
 
-mask_transform = transforms.Compose([
-    # NEAREST interpolation is critical — mask values are class labels (0,1,2)
-    # other interpolation modes blend neighboring values which corrupts the labels
-    transforms.Resize((256, 256), interpolation=transforms.InterpolationMode.NEAREST),
-])
+def apply_transforms(image, mask, augment=False):
+    # Resize — NEAREST for mask to avoid blending class labels
+    image = TF.resize(image, (256, 256))
+    mask = TF.resize(mask, (256, 256), interpolation=transforms.InterpolationMode.NEAREST)
+
+    # Augmentation: random horizontal flip applied to both image AND mask together
+    if augment and random.random() > 0.5:
+        image = TF.hflip(image)
+        mask = TF.hflip(mask)
+
+    image = normalize(TF.to_tensor(image))
+    mask = torch.tensor(np.array(mask), dtype=torch.long) - 1  # (1,2,3) -> (0,1,2)
+    return image, mask
 
 # Download and load the entire dataset
 data_dir = './oxford_pet_data'
@@ -44,11 +50,12 @@ test_dataset = datasets.OxfordIIITPet(
 # to mask separately. Also converts mask labels from (1,2,3) to (0,1,2) because
 # PyTorch CrossEntropyLoss expects class indices starting from 0
 class FullDataset(Dataset):
-    def __init__(self, dataset1, dataset2):
+    def __init__(self, dataset1, dataset2, augment=False):
         self.dataset1 = dataset1
         self.dataset2 = dataset2
         self.len1 = len(dataset1)
         self.len2 = len(dataset2)
+        self.augment = augment
 
     def __len__(self):
         return self.len1 + self.len2
@@ -59,13 +66,9 @@ class FullDataset(Dataset):
         else:
             image, mask = self.dataset2[idx - self.len1]
 
-        image = image_transform(image)
-        mask = mask_transform(mask)
-        mask = torch.tensor(np.array(mask), dtype=torch.long) - 1  # (1,2,3) -> (0,1,2)
+        return apply_transforms(image, mask, augment=self.augment)
 
-        return image, mask
-
-# Combine datasets
+# Temporary combined dataset — used only to calculate total_size for the split
 full_dataset = FullDataset(train_dataset, test_dataset)
 
 # Calculate split sizes (90% train, 10% val)
@@ -77,9 +80,16 @@ print(f"Total samples: {total_size}")
 print(f"Train samples: {train_size}")
 print(f"Validation samples: {val_size}")
 
-# Random split with fixed seed for reproducibility
+# Two FullDataset instances with different augment flags — same indices, different transforms
+# Train split gets random hflip augmentation, val split does not
+full_dataset_train = FullDataset(train_dataset, test_dataset, augment=True)
+full_dataset_val   = FullDataset(train_dataset, test_dataset, augment=False)
+
 torch.manual_seed(42)
-train_set, val_set = random_split(full_dataset, [train_size, val_size])
+train_indices, val_indices = random_split(range(total_size), [train_size, val_size])
+
+train_set = torch.utils.data.Subset(full_dataset_train, train_indices.indices)
+val_set   = torch.utils.data.Subset(full_dataset_val,   val_indices.indices)
 
 print(f"\nFinal split:")
 print(f"Train set size: {len(train_set)}")
@@ -92,14 +102,16 @@ train_loader = torch.utils.data.DataLoader(
     train_set,
     batch_size=batch_size,
     shuffle=True,
-    num_workers=0  # CHANGED FROM 4 — num_workers > 0 causes crashes on Windows
+    num_workers=0,  # CHANGED FROM 4 — num_workers > 0 causes crashes on Windows
+    pin_memory=True
 )
 
 val_loader = torch.utils.data.DataLoader(
     val_set,
     batch_size=batch_size,
     shuffle=False,
-    num_workers=0  # CHANGED FROM 4 — same reason
+    num_workers=0,  # CHANGED FROM 4 — same reason
+    pin_memory=True
 )
 
 print(f"\nData loaders created successfully!")

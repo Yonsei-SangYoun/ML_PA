@@ -75,7 +75,7 @@ class UNet(nn.Module):
 
 class DiceLoss(nn.Module):
     """Dice loss — measures mask overlap. Perfect overlap = 0, no overlap = 1."""
-    def __init__(self, smooth=1.0):
+    def __init__(self, smooth=1e-6):
         super().__init__()
         self.smooth = smooth
 
@@ -160,9 +160,11 @@ class Trainer:
         for c in range(num_classes):
             intersection = ((preds == c) & (targets == c)).sum().item()
             union = ((preds == c) | (targets == c)).sum().item()
-            if union > 0:
+            if union == 0:
+                ious.append(1.0)  # class absent from both pred and target — perfect by definition
+            else:
                 ious.append(intersection / union)
-        return sum(ious) / len(ious) if ious else 0.0
+        return sum(ious) / len(ious)
 
 
 def main():
