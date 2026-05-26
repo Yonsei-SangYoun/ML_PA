@@ -133,23 +133,24 @@ class Trainer:
         return total_loss / len(loader)
 
     @torch.no_grad()
-    def validate(self, loader) -> tuple:
+    def validate(self, loader, num_classes=3) -> tuple:
         self.model.eval()
-        total_loss, total_miou = 0.0, 0.0
+        total_loss = 0.0
+        # Accumulate intersection and union across the WHOLE val set, not per-batch.
+        # Per-batch averaging inflates mIoU when a class is absent from some batches.
+        inter = torch.zeros(num_classes, device=self.device)
+        union = torch.zeros(num_classes, device=self.device)
         for images, masks in loader:
             images, masks = images.to(self.device), masks.to(self.device)
             logits = self.model(images)
-            total_loss  += self.criterion(logits, masks).item()
-            total_miou  += self._compute_miou(logits.argmax(dim=1), masks)
-        return total_loss / len(loader), total_miou / len(loader)
-
-    def _compute_miou(self, preds, targets, num_classes=3) -> float:
-        ious = []
-        for c in range(num_classes):
-            intersection = ((preds == c) & (targets == c)).sum().item()
-            union        = ((preds == c) | (targets == c)).sum().item()
-            ious.append(1.0 if union == 0 else intersection / union)
-        return sum(ious) / len(ious)
+            total_loss += self.criterion(logits, masks).item()
+            preds = logits.argmax(dim=1)
+            for c in range(num_classes):
+                inter[c] += ((preds == c) & (masks == c)).sum()
+                union[c] += ((preds == c) | (masks == c)).sum()
+        iou  = inter / (union + 1e-9)
+        miou = iou.mean().item()
+        return total_loss / len(loader), miou
 
 
 def main():
