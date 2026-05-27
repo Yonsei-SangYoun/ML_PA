@@ -10,6 +10,15 @@ from albumentations.pytorch import ToTensorV2
 
 
 # ── Augmentation pipelines ────────────────────────────────────────────────────
+#
+# Why CoarseDropout was added (Bundle B):
+#   Cuts random rectangular holes in the input image. The model has to predict
+#   the correct mask for those pixels using *surrounding context*, since the
+#   image content is gone. This forces the model to rely on shape/context
+#   instead of memorizing local fur textures specific to cats/dogs, which
+#   helps a lot for out-of-distribution animals (hamsters, owls, turtles).
+#   Important: mask_fill_value=None means the ground-truth mask is NOT modified
+#   — only the image gets the holes. This is the standard "Cutout" recipe.
 
 train_transform = A.Compose([
     A.Resize(256, 256),
@@ -25,6 +34,13 @@ train_transform = A.Compose([
         A.MotionBlur(blur_limit=5, p=1.0),
         A.GaussNoise(var_limit=(10, 50), p=1.0),
     ], p=0.3),
+    A.CoarseDropout(
+        max_holes=8, max_height=32, max_width=32,
+        min_holes=1, min_height=16, min_width=16,
+        fill_value=0,
+        mask_fill_value=None,   # leave ground-truth mask untouched
+        p=0.3
+    ),
     A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ToTensorV2(),
 ])
@@ -73,7 +89,6 @@ test_dataset = datasets.OxfordIIITPet(
     root=data_dir, split='test', download=True, target_types='segmentation'
 )
 
-# Two FullDataset instances with different augment flags but same indices
 full_dataset_train = FullDataset(train_dataset, test_dataset, augment=True)
 full_dataset_val   = FullDataset(train_dataset, test_dataset, augment=False)
 
@@ -85,6 +100,9 @@ print(f"Total samples: {total_size}")
 print(f"Train samples: {train_size}")
 print(f"Validation samples: {val_size}")
 
+# KEEP this seed=42 fixed across all training runs.
+# We want the same train/val split every time so val mIoU is comparable
+# between seed=42, seed=123, seed=7 runs for ensembling.
 torch.manual_seed(42)
 train_indices, val_indices = random_split(range(total_size), [train_size, val_size])
 
@@ -103,7 +121,7 @@ train_loader = torch.utils.data.DataLoader(
     train_set,
     batch_size=batch_size,
     shuffle=True,
-    num_workers=4,       # fine on Vessl Linux
+    num_workers=4,
     pin_memory=True
 )
 

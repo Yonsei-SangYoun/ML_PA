@@ -1,4 +1,11 @@
-"""Run inference on Kaggle test images and save per-image .npy predictions.
+"""Run inference on Kaggle test images with hflip-only TTA.
+
+Why hflip-only TTA:
+    The model was trained with HorizontalFlip augmentation, so it's invariant
+    to hflips at test time. But vflip and 180° rotation were NEVER in training,
+    so the model gives unreliable predictions on upside-down images.
+    Averaging good predictions with bad ones drags the final score down —
+    which is why the previous 4-way TTA hurt instead of helped.
 
 Usage:
     python inference.py \
@@ -92,10 +99,12 @@ normalize = transforms.Normalize(
 @torch.no_grad()
 def predict(model, image_path, device):
     """Return a (H, W) uint8 numpy array with values in {0, 1, 2}
-    at the ORIGINAL image resolution, using test-time augmentation (TTA).
+    at the ORIGINAL image resolution, using hflip-only TTA.
     
-    TTA: run inference on original + hflip + vflip + 180° rotation,
-    average the softmax probability maps, then argmax.
+    Process:
+      1. Run model on original image -> probability map p_orig
+      2. Run model on hflipped image -> p_h, then unflip p_h
+      3. Average p_orig and p_h, then argmax
     Averaging probabilities (not predictions) keeps confidence info intact.
     """
     img = Image.open(image_path).convert("RGB")
@@ -104,29 +113,18 @@ def predict(model, image_path, device):
     def to_tensor(pil_img):
         return normalize(TF.to_tensor(TF.resize(pil_img, (256, 256)))).unsqueeze(0).to(device)
 
-    # Four augmentations: original, hflip, vflip, 180° rotation
-    img_h = TF.hflip(img)
-    img_v = TF.vflip(img)
-    img_r = TF.rotate(img, 180)
-
     inp   = to_tensor(img)
-    inp_h = to_tensor(img_h)
-    inp_v = to_tensor(img_v)
-    inp_r = to_tensor(img_r)
+    inp_h = to_tensor(TF.hflip(img))
 
-    # Forward pass for each augmented version
+    # Forward + softmax for both versions
     p_orig = torch.softmax(model(inp),   dim=1)
     p_h    = torch.softmax(model(inp_h), dim=1)
-    p_v    = torch.softmax(model(inp_v), dim=1)
-    p_r    = torch.softmax(model(inp_r), dim=1)
 
-    # Undo the augmentations on the probability maps before averaging
-    p_h = torch.flip(p_h, dims=[3])   # undo hflip
-    p_v = torch.flip(p_v, dims=[2])   # undo vflip
-    p_r = torch.rot90(p_r, k=2, dims=[2, 3])  # undo 180° rotation
+    # Undo hflip on the flipped-image probabilities (flip back along width axis)
+    p_h = torch.flip(p_h, dims=[3])
 
-    # Average probability maps, then take argmax
-    avg_probs = (p_orig + p_h + p_v + p_r) / 4.0
+    # Average probability maps, then argmax
+    avg_probs = (p_orig + p_h) / 2.0
     pred = avg_probs.argmax(dim=1)    # (1, 256, 256)
 
     # Resize back to original resolution using nearest neighbour
@@ -154,7 +152,7 @@ def main():
     model = ResNetUNet(num_classes=3).to(device)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.eval()
-    print("Model loaded.")
+    print(f"Model loaded from {args.model_path}")
 
     test_dir = Path(args.test_dir)
     pred_dir = Path(args.pred_dir)
@@ -170,7 +168,7 @@ def main():
         npy_path = pred_dir / f"{img_path.stem}.npy"
         np.save(npy_path, pred)
         if (i + 1) % 50 == 0 or (i + 1) == len(image_paths):
-            print(f"  [{i+1}/{len(image_paths)}] {img_path.name} → {npy_path.name}")
+            print(f"  [{i+1}/{len(image_paths)}] {img_path.name} -> {npy_path.name}")
 
     print(f"\nDone. Predictions saved to: {pred_dir}")
     print("\nNow run:")
